@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF 페이지 분할기</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; background:#f4f6f9; font-family:Arial,'Malgun Gothic',sans-serif; color:#182232; }
+    main { max-width:740px; margin:48px auto; padding:0 16px; }
+    .panel { background:white; padding:32px; border-radius:18px; box-shadow:0 12px 40px #12284a14; }
+    h1 { font-size:25px; margin:0 0 10px; }
+    .desc { color:#66758a; line-height:1.6; margin:0 0 26px; }
+    .step { font-weight:700; margin:22px 0 10px; }
+    input[type=file] { width:100%; padding:14px; border:1px dashed #8fa4c3; border-radius:10px; background:#f8faff; }
+    input[type=text] { width:100%; padding:13px 14px; border:1px solid #c9d3e0; border-radius:10px; font-size:16px; }
+    input:focus { outline:2px solid #91b8f8; }
+    .hint { margin:8px 0 0; font-size:13px; color:#728096; line-height:1.6; }
+    .info { margin:14px 0; font-size:14px; color:#274e87; font-weight:600; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:26px; }
+    button { background:#225cd5; color:#fff; border:none; border-radius:9px; padding:13px 20px; cursor:pointer; font-size:15px; font-weight:700; }
+    button:disabled { background:#a8b6ca; cursor:not-allowed; }
+    .secondary { background:#e7eefb; color:#244f96; }
+    #status { margin:16px 0 0; font-size:14px; min-height:20px; white-space:pre-wrap; }
+    #pages { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; max-height:210px; overflow:auto; }
+    .page { display:inline-flex; align-items:center; gap:5px; font-size:13px; border:1px solid #d6dfe9; border-radius:7px; padding:7px 9px; cursor:pointer; user-select:none; }
+    .page:has(input:checked) { border-color:#225cd5; background:#eaf1ff; }
+    .page input { accent-color:#225cd5; }
+    footer { margin-top:20px; font-size:12px; color:#738198; line-height:1.6; }
+  </style>
+</head>
+<body>
+  <main><section class="panel">
+    <h1>PDF 페이지 분할기</h1>
+    <p class="desc">PDF 파일을 업로드하고 필요한 페이지를 선택한 다음 새 PDF로 저장하세요.</p>
+
+    <div class="step">1. PDF 파일 업로드</div>
+    <input id="file" type="file" accept="application/pdf,.pdf" />
+    <p class="info" id="fileInfo">선택된 파일이 없습니다.</p>
+
+    <div class="step">2. 원하는 페이지 선택</div>
+    <input id="range" type="text" placeholder="예: 2,3 또는 2-5,8" disabled />
+    <p class="hint">쉼표(,) 또는 범위(-)로 입력할 수 있습니다. 아래 페이지 체크박스로도 선택할 수 있습니다.</p>
+    <div id="pages" aria-label="페이지 선택"></div>
+
+    <div class="actions">
+      <button id="all" class="secondary" disabled>전체 선택</button>
+      <button id="clear" class="secondary" disabled>선택 해제</button>
+      <button id="save" disabled>3. 분할 및 PDF 저장</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+    <footer>PDF 데이터는 서버에 전송되지 않고 브라우저에서 처리됩니다. 최초 실행 시 PDF 처리용 JavaScript 라이브러리를 인터넷에서 불러옵니다.</footer>
+  </section></main>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script>
+    const fileInput = document.getElementById('file');
+    const rangeInput = document.getElementById('range');
+    const pagesDiv = document.getElementById('pages');
+    const statusEl = document.getElementById('status');
+    const infoEl = document.getElementById('fileInfo');
+    const saveBtn = document.getElementById('save');
+    const allBtn = document.getElementById('all');
+    const clearBtn = document.getElementById('clear');
+    let sourceBytes = null;
+    let pageCount = 0;
+
+    function showStatus(message, error = false) {
+      statusEl.textContent = message;
+      statusEl.style.color = error ? '#c02c38' : '#267145';
+    }
+
+    function parsePages(text) {
+      if (!text.trim()) return [];
+      const selected = new Set();
+      for (const token of text.split(',')) {
+        const part = token.trim();
+        const single = part.match(/^(\d+)$/);
+        const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+        if (single) {
+          const p = Number(single[1]);
+          if (p < 1 || p > pageCount) throw Error('페이지는 1부터 ' + pageCount + ' 사이여야 합니다.');
+          selected.add(p);
+        } else if (range) {
+          const start = Number(range[1]), end = Number(range[2]);
+          if (start < 1 || end > pageCount || start > end) throw Error('페이지 범위를 다시 확인해 주세요.');
+          for (let p = start; p <= end; p++) selected.add(p);
+        } else {
+          throw Error('페이지 선택 형식이 올바르지 않습니다: ' + part);
+        }
+      }
+      return [...selected].sort((a, b) => a - b);
+    }
+
+    function updateChecks() {
+      try {
+        const selected = new Set(parsePages(rangeInput.value));
+        for (const input of pagesDiv.querySelectorAll('input')) input.checked = selected.has(Number(input.value));
+        showStatus('');
+      } catch (error) { showStatus(error.message, true); }
+    }
+
+    function updateRangeFromChecks() {
+      rangeInput.value = [...pagesDiv.querySelectorAll('input:checked')].map(x => x.value).join(',');
+      showStatus('');
+    }
+
+    function setLoaded(loaded) {
+      rangeInput.disabled = !loaded;
+      allBtn.disabled = !loaded;
+      clearBtn.disabled = !loaded;
+      saveBtn.disabled = !loaded;
+    }
+
+    fileInput.addEventListener('change', async () => {
+      sourceBytes = null;
+      pageCount = 0;
+      pagesDiv.replaceChildren();
+      rangeInput.value = '';
+      infoEl.textContent = '파일 확인 중...';
+      setLoaded(false);
+      showStatus('');
+      const file = fileInput.files[0];
+      if (!file) { infoEl.textContent = '선택된 파일이 없습니다.'; return; }
+      if (!window.PDFLib) { infoEl.textContent = '파일을 읽을 수 없습니다.'; showStatus('PDF 라이브러리 로딩 실패. 인터넷 연결을 확인해 주세요.', true); return; }
+      try {
+        const buffer = await file.arrayBuffer();
+        const doc = await PDFLib.PDFDocument.load(buffer);
+        sourceBytes = new Uint8Array(buffer);
+        pageCount = doc.getPageCount();
+        infoEl.textContent = file.name + ' (' + pageCount + '페이지)';
+        const fragment = document.createDocumentFragment();
+        for (let i = 1; i <= pageCount; i++) {
+          const label = document.createElement('label');
+          label.className = 'page';
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.value = i;
+          checkbox.addEventListener('change', updateRangeFromChecks);
+          label.append(checkbox, document.createTextNode(i + '페이지'));
+          fragment.append(label);
+        }
+        pagesDiv.append(fragment);
+        setLoaded(true);
+        showStatus('PDF를 불러왔습니다. 원하는 페이지를 선택하세요.');
+      } catch (error) {
+        infoEl.textContent = 'PDF 불러오기 실패';
+        showStatus('파일을 확인해 주세요. 암호화되었거나 손상된 PDF는 지원하지 않을 수 있습니다.', true);
+      }
+    });
+
+    rangeInput.addEventListener('input', updateChecks);
+    allBtn.addEventListener('click', () => {
+      rangeInput.value = '1-' + pageCount;
+      updateChecks();
+    });
+    clearBtn.addEventListener('click', () => {
+      rangeInput.value = '';
+      updateChecks();
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      if (!sourceBytes) return;
+      try {
+        const selection = parsePages(rangeInput.value);
+        if (!selection.length) throw Error('저장할 페이지를 하나 이상 선택해 주세요.');
+        saveBtn.disabled = true;
+        showStatus('선택한 페이지를 PDF로 만드는 중...');
+        const source = await PDFLib.PDFDocument.load(sourceBytes);
+        const target = await PDFLib.PDFDocument.create();
+        const copiedPages = await target.copyPages(source, selection.map(p => p - 1));
+        copiedPages.forEach(p => target.addPage(p));
+        const bytes = await target.save();
+        const blob = new Blob([bytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        const base = fileInput.files[0].name.replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '_');
+        link.href = url;
+        link.download = base + '_pages_' + selection.join('-') + '.pdf';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        showStatus(selection.length + '페이지 PDF 저장이 시작되었습니다.');
+      } catch (error) {
+        showStatus(error.message || 'PDF 저장 중 오류가 발생했습니다.', true);
+      } finally { saveBtn.disabled = false; }
+    });
+  </script>
+</body>
+</html>
